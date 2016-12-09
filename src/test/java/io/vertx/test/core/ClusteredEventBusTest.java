@@ -16,18 +16,13 @@
 
 package io.vertx.test.core;
 
-import io.vertx.core.AsyncResult;
-import io.vertx.core.Handler;
 import io.vertx.core.Vertx;
 import io.vertx.core.VertxOptions;
 import io.vertx.core.eventbus.*;
 import io.vertx.core.impl.VertxInternal;
-import io.vertx.core.spi.cluster.ClusterManager;
-import io.vertx.test.fakecluster.FakeClusterManager;
 import org.junit.Test;
 
 import java.util.ArrayList;
-import java.util.Map;
 import java.util.concurrent.ConcurrentLinkedDeque;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicBoolean;

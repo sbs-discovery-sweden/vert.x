@@ -27,17 +27,15 @@ import io.vertx.core.logging.LoggerFactory;
 import io.vertx.core.spi.cluster.ClusterManager;
 import io.vertx.core.spi.cluster.NodeListener;
 
-import java.util.ArrayList;
-import java.util.Iterator;
-import java.util.List;
-import java.util.Map;
-import java.util.Queue;
+import java.util.*;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Consumer;
 
-import static java.util.concurrent.TimeUnit.*;
+import static java.util.concurrent.TimeUnit.MINUTES;
+import static java.util.concurrent.TimeUnit.NANOSECONDS;
 
 /**
  *
@@ -122,10 +120,10 @@ public class HAManager {
   private long quorumTimerID;
   private volatile boolean attainedQuorum;
   private volatile FailoverCompleteHandler failoverCompleteHandler;
-  private volatile FailoverCompleteHandler nodeCrashedHandler;
   private volatile boolean failDuringFailover;
   private volatile boolean stopped;
   private volatile boolean killed;
+  private Consumer<Set<String>> clusterViewChangedHandler;
 
   public HAManager(VertxInternal vertx, DeploymentManager deploymentManager,
                    ClusterManager clusterManager, int quorumSize, String group, boolean enabled) {
@@ -248,8 +246,8 @@ public class HAManager {
     this.failoverCompleteHandler = failoverCompleteHandler;
   }
 
-  public void setNodeCrashedHandler(FailoverCompleteHandler removeSubsHandler) {
-    this.nodeCrashedHandler = removeSubsHandler;
+  public void setClusterViewChangedHandler(Consumer<Set<String>> handler) {
+    this.clusterViewChangedHandler = handler;
   }
 
   public boolean isKilled() {
@@ -287,6 +285,9 @@ public class HAManager {
      // This is not ideal but we need to wait for the group information to appear - and this will be shortly
     // after the node has been added
     checkQuorumWhenAdded(nodeID, System.currentTimeMillis());
+    if(clusterViewChangedHandler!=null) {
+      clusterViewChangedHandler.accept(new HashSet<>(clusterManager.getNodes()));
+    }
   }
 
   // A node has left the cluster
@@ -295,7 +296,9 @@ public class HAManager {
 
     checkQuorum();
     if (attainedQuorum) {
-
+      if(clusterViewChangedHandler!=null) {
+        clusterViewChangedHandler.accept(new HashSet<>(clusterManager.getNodes()));
+      }
       // Check for failover
       String sclusterInfo = clusterMap.get(leftNodeID);
 
@@ -303,7 +306,6 @@ public class HAManager {
         // Clean close - do nothing
       } else {
         JsonObject clusterInfo = new JsonObject(sclusterInfo);
-        checkRemoveSubs(leftNodeID, clusterInfo);
         checkFailover(leftNodeID, clusterInfo);
       }
 
@@ -314,7 +316,6 @@ public class HAManager {
       for (Map.Entry<String, String> entry: clusterMap.entrySet()) {
         if (!leftNodeID.equals(entry.getKey()) && !nodes.contains(entry.getKey())) {
           JsonObject haInfo = new JsonObject(entry.getValue());
-          checkRemoveSubs(entry.getKey(), haInfo);
           checkFailover(entry.getKey(), haInfo);
         }
       }
@@ -487,13 +488,6 @@ public class HAManager {
     }
   }
 
-  private void checkRemoveSubs(String failedNodeID, JsonObject theHAInfo) {
-    String chosen = chooseHashedNode(null, failedNodeID.hashCode());
-    if (chosen != null && chosen.equals(this.nodeID)) {
-      callFailoverCompleteHandler(nodeCrashedHandler, failedNodeID, theHAInfo, true);
-    }
-  }
-
   private void callFailoverCompleteHandler(String nodeID, JsonObject haInfo, boolean result) {
     callFailoverCompleteHandler(failoverCompleteHandler, nodeID, haInfo, result);
   }
@@ -581,5 +575,11 @@ public class HAManager {
     }
   }
 
+  public String getNodeID() {
+    return nodeID;
+  }
 
+  public Map<String, String> getClusterMap() {
+    return clusterMap;
+  }
 }

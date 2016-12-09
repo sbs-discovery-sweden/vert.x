@@ -20,7 +20,10 @@ import io.vertx.core.*;
 import io.vertx.core.buffer.Buffer;
 import io.vertx.core.eventbus.EventBusOptions;
 import io.vertx.core.eventbus.MessageCodec;
-import io.vertx.core.eventbus.impl.*;
+import io.vertx.core.eventbus.impl.CodecManager;
+import io.vertx.core.eventbus.impl.EventBusImpl;
+import io.vertx.core.eventbus.impl.HandlerHolder;
+import io.vertx.core.eventbus.impl.MessageImpl;
 import io.vertx.core.impl.HAManager;
 import io.vertx.core.impl.VertxInternal;
 import io.vertx.core.json.JsonObject;
@@ -33,8 +36,7 @@ import io.vertx.core.spi.cluster.AsyncMultiMap;
 import io.vertx.core.spi.cluster.ChoosableIterable;
 import io.vertx.core.spi.cluster.ClusterManager;
 
-import java.util.Objects;
-import java.util.UUID;
+import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 
@@ -60,8 +62,10 @@ public class ClusteredEventBus extends EventBusImpl {
   private final Context sendNoContext;
 
   private EventBusOptions options;
-  private AsyncMultiMap<String, ServerID> subs;
+  private AsyncMultiMap<String, ClusterNodeInfo> subs;
+  private Map<String, ClusterNodeInfo> localSubs = new HashMap<>();
   private ServerID serverID;
+  private ClusterNodeInfo nodeInfo;
   private NetServer server;
 
   public ClusteredEventBus(VertxInternal vertx,
@@ -73,7 +77,7 @@ public class ClusteredEventBus extends EventBusImpl {
     this.clusterManager = clusterManager;
     this.haManager = haManager;
     this.sendNoContext = vertx.getOrCreateContext();
-    setNodeCrashedHandler(haManager);
+    setClusterViewChangedHandler(haManager);
   }
 
   private NetServerOptions getServerOptions() {
@@ -113,7 +117,7 @@ public class ClusteredEventBus extends EventBusImpl {
 
   @Override
   public void start(Handler<AsyncResult<Void>> resultHandler) {
-    clusterManager.<String, ServerID>getAsyncMultiMap(SUBS_MAP_NAME, ar2 -> {
+    clusterManager.<String, ClusterNodeInfo>getAsyncMultiMap(SUBS_MAP_NAME, ar2 -> {
       if (ar2.succeeded()) {
         subs = ar2.result();
         server = vertx.createNetServer(getServerOptions());
@@ -124,6 +128,7 @@ public class ClusteredEventBus extends EventBusImpl {
             int serverPort = getClusterPublicPort(options, server.actualPort());
             String serverHost = getClusterPublicHost(options);
             serverID = new ServerID(serverPort, serverHost);
+            nodeInfo = new ClusterNodeInfo(haManager.getNodeID(), serverHost, serverPort);
             haManager.addDataToAHAInfo(SERVER_ID_HA_KEY, new JsonObject().put("host", serverID.host).put("port", serverID.port));
             if (resultHandler != null) {
               started = true;
@@ -187,7 +192,8 @@ public class ClusteredEventBus extends EventBusImpl {
                                      Handler<AsyncResult<Void>> completionHandler) {
     if (newAddress && subs != null && !replyHandler && !localOnly) {
       // Propagate the information
-      subs.add(address, serverID, completionHandler);
+      subs.add(address, nodeInfo, completionHandler);
+      localSubs.put(address, nodeInfo);
     } else {
       completionHandler.handle(Future.succeededFuture());
     }
@@ -197,7 +203,8 @@ public class ClusteredEventBus extends EventBusImpl {
   protected <T> void removeRegistration(HandlerHolder lastHolder, String address,
                                         Handler<AsyncResult<Void>> completionHandler) {
     if (lastHolder != null && subs != null && !lastHolder.isLocalOnly()) {
-      removeSub(address, serverID, completionHandler);
+      localSubs.remove(address);
+      removeSub(address, nodeInfo, completionHandler);
     } else {
       callCompletionHandlerAsync(completionHandler);
     }
@@ -211,9 +218,9 @@ public class ClusteredEventBus extends EventBusImpl {
   @Override
   protected <T> void sendOrPub(SendContextImpl<T> sendContext) {
     String address = sendContext.message.address();
-    Handler<AsyncResult<ChoosableIterable<ServerID>>> resultHandler = asyncResult -> {
+    Handler<AsyncResult<ChoosableIterable<ClusterNodeInfo>>> resultHandler = asyncResult -> {
       if (asyncResult.succeeded()) {
-        ChoosableIterable<ServerID> serverIDs = asyncResult.result();
+        ChoosableIterable<ClusterNodeInfo> serverIDs = asyncResult.result();
         if (serverIDs != null && !serverIDs.isEmpty()) {
           sendToSubs(serverIDs, sendContext);
         } else {
@@ -246,16 +253,33 @@ public class ClusteredEventBus extends EventBusImpl {
     return !clusteredMessage.isFromWire();
   }
 
-  private void setNodeCrashedHandler(HAManager haManager) {
-    haManager.setNodeCrashedHandler((failedNodeID, haInfo, failed) -> {
-      JsonObject jsid = haInfo.getJsonObject(SERVER_ID_HA_KEY);
-      if (jsid != null) {
-        ServerID sid = new ServerID(jsid.getInteger("port"), jsid.getString("host"));
-        if (subs != null) {
-          subs.removeAllForValue(sid, res -> {
+  private void setClusterViewChangedHandler(HAManager haManager) {
+    haManager.setClusterViewChangedHandler(members -> {
+      // Ensure consistency of the subs map.
+      // Get rid of the cache by getting the map from the cluster manager.
+      clusterManager.<String, ClusterNodeInfo>getAsyncMultiMap(SUBS_MAP_NAME, ar -> {
+        if(ar.succeeded() && ar.result()!=null) {
+          this.subs = ar.result();
+          // Add ourselves in case we are not in the map
+          if(members.contains(haManager.getNodeID())) {
+            localSubs.forEach((address, ci) -> {
+              subs.add(address, ci, addResult -> {
+                if (addResult.failed()) {
+                  log.warn("Failed to update subs map with self", addResult.cause());
+                }
+              });
+            });
+          }
+
+          // Remove subs that are not cluster members.
+          subs.removeAll(ci -> !members.contains(ci.nodeId), removeResult -> {
+            if(removeResult.failed()) {
+              log.warn("Error removing subs", removeResult.cause());
+            }
           });
+
         }
-      }
+      });
     });
   }
 
@@ -307,11 +331,12 @@ public class ClusteredEventBus extends EventBusImpl {
     };
   }
 
-  private <T> void sendToSubs(ChoosableIterable<ServerID> subs, SendContextImpl<T> sendContext) {
+  private <T> void sendToSubs(ChoosableIterable<ClusterNodeInfo> subs, SendContextImpl<T> sendContext) {
     String address = sendContext.message.address();
     if (sendContext.message.send()) {
       // Choose one
-      ServerID sid = subs.choose();
+      ClusterNodeInfo ci = subs.choose();
+      ServerID sid = new ServerID(ci.port, ci.host);
       if (!sid.equals(serverID)) {  //We don't send to this node
         metrics.messageSent(address, false, false, true);
         sendRemote(sid, sendContext.message);
@@ -323,7 +348,8 @@ public class ClusteredEventBus extends EventBusImpl {
       // Publish
       boolean local = false;
       boolean remote = false;
-      for (ServerID sid : subs) {
+      for (ClusterNodeInfo ci : subs) {
+        ServerID sid = new ServerID(ci.port, ci.host);
         if (!sid.equals(serverID)) {  //We don't send to this node
           remote = true;
           sendRemote(sid, sendContext.message);
@@ -372,8 +398,8 @@ public class ClusteredEventBus extends EventBusImpl {
     holder.writeMessage((ClusteredMessage)message);
   }
 
-  private void removeSub(String subName, ServerID theServerID, Handler<AsyncResult<Void>> completionHandler) {
-    subs.remove(subName, theServerID, ar -> {
+  private void removeSub(String subName, ClusterNodeInfo node, Handler<AsyncResult<Void>> completionHandler) {
+    subs.remove(subName, node, ar -> {
       if (!ar.succeeded()) {
         log.error("Failed to remove sub", ar.cause());
       } else {
@@ -403,5 +429,8 @@ public class ClusteredEventBus extends EventBusImpl {
     return options;
   }
 
+  public AsyncMultiMap<String, ClusterNodeInfo> subs() {
+    return subs;
+  }
 }
 
