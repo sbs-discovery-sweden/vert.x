@@ -290,16 +290,19 @@ public class HAManager {
     // This is not ideal but we need to wait for the group information to appear - and this will be shortly
     // after the node has been added
     checkQuorumWhenAdded(nodeID, System.currentTimeMillis());
-    checkRemoveSubs(nodeID);
+    checkSubs(nodeID);
   }
 
   // A node has left the cluster
   // synchronize this in case the cluster manager is naughty and calls it concurrently
   private synchronized void nodeLeft(String leftNodeID) {
+    if (stopped) {
+      return;
+    }
 
     checkQuorum();
     if (attainedQuorum) {
-      checkRemoveSubs(leftNodeID);
+      checkSubs(leftNodeID);
 
       // Check for failover
       String sclusterInfo = clusterMap.get(leftNodeID);
@@ -482,36 +485,38 @@ public class HAManager {
         }
         // Failover is complete! We can now remove the failed node from the cluster map
         clusterMap.remove(failedNodeID);
-        callFailoverCompleteHandler(failedNodeID, theHAInfo, true);
+        runOnContextAndWait(() -> {
+          if (failoverCompleteHandler != null) {
+            failoverCompleteHandler.handle(failedNodeID, theHAInfo, true);
+          }
+        });
       }
     } catch (Throwable t) {
       log.error("Failed to handle failover", t);
-      callFailoverCompleteHandler(failedNodeID, theHAInfo, false);
-    }
-  }
-
-  private void checkRemoveSubs(String failedNodeID) {
-    if (clusterViewChangedHandler != null && !failedNodeID.equals(this.nodeID)) {
-      clusterViewChangedHandler.accept(new HashSet<>(clusterManager.getNodes()));
-    }
-  }
-
-  private void callFailoverCompleteHandler(String nodeID, JsonObject haInfo, boolean result) {
-    callFailoverCompleteHandler(failoverCompleteHandler, nodeID, haInfo, result);
-  }
-
-  private void callFailoverCompleteHandler(FailoverCompleteHandler handler, String nodeID, JsonObject haInfo, boolean result) {
-    if (handler != null) {
-      CountDownLatch latch = new CountDownLatch(1);
-      // The testsuite requires that this is called on a Vert.x thread
-      vertx.runOnContext(v -> {
-        handler.handle(nodeID, haInfo, result);
-        latch.countDown();
+      runOnContextAndWait(() -> {
+        if (failoverCompleteHandler != null) {
+          failoverCompleteHandler.handle(failedNodeID, theHAInfo, false);
+        }
       });
-      try {
-        latch.await(30, TimeUnit.SECONDS);
-      } catch (InterruptedException ignore) {
-      }
+    }
+  }
+
+  private void checkSubs(String nodeId) {
+    if (clusterViewChangedHandler != null && !nodeId.equals(this.nodeID)) {
+      runOnContextAndWait(() -> clusterViewChangedHandler.accept(new HashSet<>(clusterManager.getNodes())));
+    }
+  }
+
+  private void runOnContextAndWait(Runnable runnable) {
+    CountDownLatch latch = new CountDownLatch(1);
+    // The testsuite requires that this is called on a Vert.x thread
+    vertx.runOnContext(v -> {
+      runnable.run();
+      latch.countDown();
+    });
+    try {
+      latch.await(30, TimeUnit.SECONDS);
+    } catch (InterruptedException ignore) {
     }
   }
 
