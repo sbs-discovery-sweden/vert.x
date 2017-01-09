@@ -51,8 +51,6 @@ import io.vertx.core.spi.cluster.AsyncMultiMap;
 import io.vertx.core.spi.cluster.ChoosableIterable;
 import io.vertx.core.spi.cluster.ClusterManager;
 
-import java.util.HashMap;
-import java.util.Map;
 import java.util.Objects;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -81,7 +79,6 @@ public class ClusteredEventBus extends EventBusImpl {
 
   private EventBusOptions options;
   private AsyncMultiMap<String, ClusterNodeInfo> subs;
-  private Map<String, ClusterNodeInfo> localSubs = new HashMap<>();
   private ServerID serverID;
   private ClusterNodeInfo nodeInfo;
   private NetServer server;
@@ -211,7 +208,6 @@ public class ClusteredEventBus extends EventBusImpl {
     if (newAddress && subs != null && !replyHandler && !localOnly) {
       // Propagate the information
       subs.add(address, nodeInfo, completionHandler);
-      localSubs.put(address, nodeInfo);
     } else {
       completionHandler.handle(Future.succeededFuture());
     }
@@ -221,7 +217,6 @@ public class ClusteredEventBus extends EventBusImpl {
   protected <T> void removeRegistration(HandlerHolder lastHolder, String address,
                                         Handler<AsyncResult<Void>> completionHandler) {
     if (lastHolder != null && subs != null && !lastHolder.isLocalOnly()) {
-      localSubs.remove(address);
       removeSub(address, nodeInfo, completionHandler);
     } else {
       callCompletionHandlerAsync(completionHandler);
@@ -280,8 +275,8 @@ public class ClusteredEventBus extends EventBusImpl {
           this.subs = ar.result();
           // Add ourselves in case we are not in the map
           if(members.contains(haManager.getNodeID())) {
-            localSubs.forEach((address, ci) -> {
-              subs.add(address, ci, addResult -> {
+            handlerMap.keySet().forEach(address -> {
+              subs.add(address, nodeInfo, addResult -> {
                 if (addResult.failed()) {
                   log.warn("Failed to update subs map with self", addResult.cause());
                 }
