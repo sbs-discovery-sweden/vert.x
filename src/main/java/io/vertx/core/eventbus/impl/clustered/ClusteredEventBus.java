@@ -268,29 +268,21 @@ public class ClusteredEventBus extends EventBusImpl {
 
   private void setClusterViewChangedHandler(HAManager haManager) {
     haManager.setClusterViewChangedHandler(members -> {
-      // Ensure consistency of the subs map.
-      // Get rid of the cache by getting the map from the cluster manager.
-      clusterManager.<String, ClusterNodeInfo>getAsyncMultiMap(SUBS_MAP_NAME, ar -> {
-        if(ar.succeeded() && ar.result()!=null) {
-          this.subs = ar.result();
-          // Add ourselves in case we are not in the map
-          if(members.contains(haManager.getNodeID())) {
-            handlerMap.keySet().forEach(address -> {
-              subs.add(address, nodeInfo, addResult -> {
-                if (addResult.failed()) {
-                  log.warn("Failed to update subs map with self", addResult.cause());
-                }
-              });
-            });
-          }
-
-          // Remove subs that are not cluster members.
-          subs.removeAll(ci -> !members.contains(ci.nodeId), removeResult -> {
-            if(removeResult.failed()) {
-              log.warn("Error removing subs", removeResult.cause());
+      // Add ourselves in case we are not in the map
+      if (members.contains(haManager.getNodeID())) {
+        handlerMap.keySet().forEach(address -> {
+          subs.add(address, nodeInfo, addResult -> {
+            if (addResult.failed()) {
+              log.warn("Failed to update subs map with self", addResult.cause());
             }
           });
+        });
+      }
 
+      // Remove subs that are not cluster members.
+      subs.removeAll(ci -> !members.contains(ci.nodeId), removeResult -> {
+        if (removeResult.failed()) {
+          log.warn("Error removing subs", removeResult.cause());
         }
       });
     });
