@@ -287,12 +287,10 @@ public class HAManager {
   // A node has joined the cluster
   // synchronize this in case the cluster manager is naughty and calls it concurrently
   private synchronized void nodeAdded(final String nodeID) {
-     // This is not ideal but we need to wait for the group information to appear - and this will be shortly
+    // This is not ideal but we need to wait for the group information to appear - and this will be shortly
     // after the node has been added
     checkQuorumWhenAdded(nodeID, System.currentTimeMillis());
-    if(clusterViewChangedHandler!=null) {
-      clusterViewChangedHandler.accept(new HashSet<>(clusterManager.getNodes()));
-    }
+    checkRemoveSubs(nodeID);
   }
 
   // A node has left the cluster
@@ -301,9 +299,8 @@ public class HAManager {
 
     checkQuorum();
     if (attainedQuorum) {
-      if(clusterViewChangedHandler!=null) {
-        clusterViewChangedHandler.accept(new HashSet<>(clusterManager.getNodes()));
-      }
+      checkRemoveSubs(leftNodeID);
+
       // Check for failover
       String sclusterInfo = clusterMap.get(leftNodeID);
 
@@ -490,6 +487,12 @@ public class HAManager {
     } catch (Throwable t) {
       log.error("Failed to handle failover", t);
       callFailoverCompleteHandler(failedNodeID, theHAInfo, false);
+    }
+  }
+
+  private void checkRemoveSubs(String failedNodeID) {
+    if (clusterViewChangedHandler != null && !failedNodeID.equals(this.nodeID)) {
+      clusterViewChangedHandler.accept(new HashSet<>(clusterManager.getNodes()));
     }
   }
 
