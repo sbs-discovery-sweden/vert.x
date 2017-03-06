@@ -69,6 +69,7 @@ class ConnectionHolder {
       metrics.messageWritten(message.address(), data.length());
       socket.write(data);
     } else {
+      log.error("Write message not written from: " + message.address() + ", to: " + message.replyAddress());
       if (pending == null) {
         pending = new ArrayDeque<>();
       }
@@ -113,7 +114,10 @@ class ConnectionHolder {
   private synchronized void connected(NetSocket socket) {
     this.socket = socket;
     connected = true;
-    socket.exceptionHandler(t -> close());
+    socket.exceptionHandler(t -> {
+      log.error("There was an error!", t.getCause());
+      close();
+    });
     socket.closeHandler(v -> close());
     socket.handler(data -> {
       // Got a pong back

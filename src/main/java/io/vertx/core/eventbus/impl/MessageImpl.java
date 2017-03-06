@@ -113,6 +113,8 @@ public class MessageImpl<U, V> implements Message<V> {
     if (replyAddress != null) {
       sendReply(bus.createMessage(true, replyAddress, null,
         new ReplyException(ReplyFailure.RECIPIENT_FAILURE, failureCode, message), null), null, null);
+    } else {
+      log.error("Reply address is null");
     }
   }
 
